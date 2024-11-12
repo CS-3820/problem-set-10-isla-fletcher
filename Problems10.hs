@@ -48,7 +48,7 @@ deriving instance Show Expr
 -- default Haskell one; feel free to uncomment it (but then, be sure to comment
 -- out the `deriving instance` line above).
 
-{-
+ {-
 instance Show Expr where
   showsPrec _ (Const i) = shows i
   showsPrec i (Plus m n) = showParen (i > 1) $ showsPrec 2 m . showString " + " . showsPrec 2 n
@@ -59,7 +59,7 @@ instance Show Expr where
   showsPrec i Recall    = showString "recall"
   showsPrec i (Throw m) = showParen (i > 2) $ showString "throw " . showsPrec 3 m
   showsPrec i (Catch m y n) = showParen (i > 0) $ showString "try " . showsPrec 0 m . showString " catch " . showString y . showString " -> " . showsPrec 0 n
--}  
+ -}  
 
 -- Values are, as usual, integer and function constants
 isValue :: Expr -> Bool
@@ -108,7 +108,10 @@ subst x m (Var y)
   | otherwise = Var y
 subst x m (Lam y n) = Lam y (substUnder x m y n)
 subst x m (App n1 n2) = App (subst x m n1) (subst x m n2)
-subst x m n = undefined
+subst x m (Catch try_block y catch_block) = Catch (subst x m try_block) y (substUnder x m y catch_block)
+subst x m (Throw exception) = Throw (subst x m exception)
+subst x m (Store expr) = Store (subst x m expr)
+subst x m n = n
 
 {-------------------------------------------------------------------------------
 
@@ -201,8 +204,95 @@ bubble; this won't *just* be `Throw` and `Catch.
 
 -------------------------------------------------------------------------------}
 
+isLambda :: Expr -> Bool
+isLambda (Lam _ _) = True
+isLambda _ = False
+
+isThrow :: Expr -> Bool
+isThrow (Throw _) = True
+isThrow _ = False
+
+getThrown :: Expr -> Expr
+getThrown (Throw v) = v
+getThrown _ = undefined
+
+isEnd :: Expr -> Bool
+isEnd (Lam _ _) = True
+isEnd (Const _) = True
+isEnd (Throw v) = isEnd v
+isEnd _ = False
+
+isNonLamEnd :: Expr -> Bool
+isNonLamEnd a = (isEnd a) && (not $ isLambda a)
+
+tryAdd :: Expr -> Expr -> Maybe Expr
+tryAdd (Const a) (Const b) = Just (Const (a + b))
+tryAdd _ _ = Nothing
+
+-- reduce layered throws into a single throw.
+reduceThrow :: Expr -> Expr
+reduceThrow (Throw v) = Throw (removeThrow v)
+reduceThrow v = v
+
+-- strip all throws from output
+removeThrow :: Expr -> Expr
+removeThrow (Throw v) = removeThrow v
+removeThrow v = v
+
 smallStep :: (Expr, Expr) -> Maybe (Expr, Expr)
-smallStep = undefined
+
+smallStep (Plus a b, acc)
+  | isThrow a = Just (reduceThrow a, acc)
+  | False == (isValue a) = case smallStep (a, acc) of
+    Just (new_a, new_acc) -> Just (Plus new_a b, new_acc)
+    _ -> Nothing
+  | isThrow b = Just (reduceThrow b, acc)
+  | False == (isValue b) = case smallStep (b, acc) of
+    Just (new_b, new_acc) -> Just (Plus a new_b, new_acc)
+    _ -> Nothing
+  | otherwise = case tryAdd a b of
+    Just sum -> Just (sum, acc)
+    _ -> Nothing
+
+smallStep (App a b, acc)
+  | isThrow a = Just (reduceThrow a, acc)
+  | (isValue a) && (not (isLambda a)) = Nothing -- cannot apply to non-lambda value
+  | False == (isValue a) = case smallStep (a,acc) of -- a non-value a should be stepped
+    Just (new_a, new_acc) -> Just (App new_a b, new_acc)
+    _ -> Nothing
+  | isThrow b = Just (reduceThrow b, acc) -- a is a lambda, see if b is throwable
+  | False == (isValue b) = case smallStep (b, acc) of -- b is not a value, step b
+    Just (new_b, new_acc) -> Just (App a new_b, new_acc)
+  | otherwise = Just (subst param b body, acc) -- a is a lambda and b is a value; substitute it in.
+    where 
+      (Lam param body) = a
+
+smallStep (Catch try e catch, acc)
+  | isValue try = Just (try, acc)
+  | isEnd try = Just (subst e (removeThrow try) catch, acc)
+  | otherwise = case smallStep (try, acc) of
+    Just (eval_try, eval_acc) -> Just (Catch eval_try e catch, eval_acc)
+    _ -> Nothing
+
+smallStep (Throw v, acc)
+  | isValue v = Nothing
+  | isThrow v = Just (v, acc)
+  | otherwise = case smallStep (v, acc) of
+    Just (v_expr, v_acc) -> Just (Throw (removeThrow v_expr), v_acc)
+    _ -> Nothing
+
+smallStep (Store expr, acc) 
+  | isValue expr = Just (expr, expr)
+  | otherwise = case smallStep (expr, acc) of
+    Just (v_expr, v_acc) -> Just (Store v_expr, v_acc)
+    Nothing -> case expr of
+      Throw v -> Just (Throw v, acc)
+      _ -> Nothing
+
+smallStep (Recall, acc) = Just (acc, acc)
+
+smallStep _ = Nothing
+
 
 steps :: (Expr, Expr) -> [(Expr, Expr)]
 steps s = case smallStep s of
